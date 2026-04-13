@@ -19,6 +19,10 @@ public enum PokeTradeResult
 
     SuspiciousActivity,
 
+    TradeEvolveNotAllowed,
+
+    UserCanceled,
+
     // Recovery -- General Bot Failures
     // Anything below here should be retried once if possible.
     RoutineCancel,

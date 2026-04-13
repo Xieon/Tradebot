@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using static Discord.GatewayIntents;
 using static SysBot.Pokemon.DiscordSettings;
 using Discord.Net;
+using SysBot.Pokemon.Discord.Helpers;
 using SysBot.Pokemon.Discord.Commands.Bots;
 
 namespace SysBot.Pokemon.Discord;
@@ -33,6 +34,9 @@ public sealed class SysCord<T> where T : PKM, new()
     private readonly Dictionary<ulong, ulong> _announcementMessageIds = [];
     private readonly DiscordSocketClient _client;
     private readonly CommandService _commands;
+    private readonly HashSet<ITradeBot> _connectedBots = [];
+    private readonly object _botConnectionLock = new object();
+    private bool _handlersRegistered = false;
 
     private readonly IServiceProvider _services;
 
@@ -46,6 +50,8 @@ public sealed class SysCord<T> where T : PKM, new()
     ];
 
     private readonly DiscordManager Manager;
+    private readonly SemaphoreSlim _reconnectSemaphore = new(1, 1);
+    private CancellationTokenSource? _reconnectCts;
 
     public SysCord(PokeBotRunner<T> runner, ProgramConfig config)
     {
@@ -58,10 +64,48 @@ public sealed class SysCord<T> where T : PKM, new()
         {
             if (bot is ITradeBot tradeBot)
             {
-                tradeBot.ConnectionError += async (sender, ex) => await HandleBotStop();
-                tradeBot.ConnectionSuccess += async (sender, e) => await HandleBotStart();
+                tradeBot.ConnectionSuccess += async (sender, e) =>
+                {
+                    bool shouldHandleStart = false;
+
+                    lock (_botConnectionLock)
+                    {
+                        _connectedBots.Add(tradeBot);
+                        if (_connectedBots.Count == 1)
+                        {
+                            // First bot connected, handle start outside lock
+                            shouldHandleStart = true;
+                        }
+                    }
+
+                    if (shouldHandleStart)
+                    {
+                        await HandleBotStart();
+                    }
+                };
+
+                tradeBot.ConnectionError += async (sender, ex) =>
+                {
+                    bool shouldHandleStop = false;
+
+                    lock (_botConnectionLock)
+                    {
+                        _connectedBots.Remove(tradeBot);
+                        if (_connectedBots.Count == 0)
+                        {
+                            // All bots disconnected, handle stop outside lock
+                            shouldHandleStop = true;
+                        }
+                    }
+
+                    if (shouldHandleStop)
+                    {
+                        await HandleBotStop();
+                    }
+                };
             }
         }
+
         SysCordSettings.Manager = Manager;
         SysCordSettings.HubConfig = Hub.Config;
 
@@ -77,13 +121,27 @@ public sealed class SysCord<T> where T : PKM, new()
             //MessageCacheSize = 50,
         });
 
+        // ===== DM Relay Setup =====
+        ulong forwardTargetId = 0;
+        if (!string.IsNullOrWhiteSpace(Hub.Config.Discord.UserDMsToBotForwarder))
+        {
+            if (!ulong.TryParse(Hub.Config.Discord.UserDMsToBotForwarder, out forwardTargetId))
+            {
+                LogUtil.LogInfo("SysCord", $"Invalid UserDMsToBotForwarder ID: {Hub.Config.Discord.UserDMsToBotForwarder}");
+            }
+        }
+
+        if (forwardTargetId != 0)
+        {
+            _ = new DMRelayService(_client, forwardTargetId, Hub.Config.Discord);
+            LogUtil.LogInfo("SysCord", $"DM relay active -> forwarding bot DMs to {forwardTargetId}");
+        }
+
         _commands = new CommandService(new CommandServiceConfig
         {
             // Again, log level:
             LogLevel = LogSeverity.Info,
 
-            // This makes commands get run on the task thread pool instead on the websocket read thread.
-            // This ensures long-running logic can't block the websocket connection.
             DefaultRunMode = RunMode.Async,
 
             // There's a few more properties you can set,
@@ -115,55 +173,97 @@ public sealed class SysCord<T> where T : PKM, new()
 
     private async Task ReconnectAsync()
     {
-        const int maxRetries = 5;
-        const int delayBetweenRetries = 5000; // 5 seconds
-        const int initialDelay = 10000; // 10 seconds
-
-        // Initial delay to allow Discord's automatic reconnection
-        await Task.Delay(initialDelay).ConfigureAwait(false);
-
-        for (int i = 0; i < maxRetries; i++)
+        // Prevent multiple concurrent reconnection attempts
+        if (!await _reconnectSemaphore.WaitAsync(0).ConfigureAwait(false))
         {
+            LogUtil.LogText("Client is already attempting to reconnect.");
+            return;
+        }
+
+        try
+        {
+            // Cancel any previous reconnection attempt
+            _reconnectCts?.Cancel();
+            _reconnectCts?.Dispose();
+            _reconnectCts = new CancellationTokenSource();
+            var cancellationToken = _reconnectCts.Token;
+
+            const int maxRetries = 5;
+            const int delayBetweenRetries = 5000; // 5 seconds
+            const int initialDelay = 10000; // 10 seconds
+
+            // Initial delay to allow Discord's automatic reconnection
+            await Task.Delay(initialDelay, cancellationToken).ConfigureAwait(false);
+
+            for (int i = 0; i < maxRetries; i++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    LogUtil.LogText("Reconnection attempt cancelled.");
+                    return;
+                }
+
+                try
+                {
+                    if (_client.ConnectionState == ConnectionState.Connected)
+                    {
+                        LogUtil.LogText("Client reconnected automatically.");
+                        return; // Already reconnected
+                    }
+
+                    // Check if the client is in the process of reconnecting
+                    if (_client.ConnectionState == ConnectionState.Connecting)
+                    {
+                        LogUtil.LogText("Waiting for automatic reconnection...");
+                        await Task.Delay(delayBetweenRetries, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    await _client.StartAsync().ConfigureAwait(false);
+                    LogUtil.LogText("Reconnected successfully.");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    LogUtil.LogText($"Reconnection attempt {i + 1} failed: {ex.Message}");
+                    if (i < maxRetries - 1)
+                        await Task.Delay(delayBetweenRetries, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // If all attempts to reconnect fail, stop and restart the bot
+            LogUtil.LogText("Failed to reconnect after maximum attempts. Restarting the bot...");
+
             try
             {
-                if (_client.ConnectionState == ConnectionState.Connected)
+                // Stop the bot cleanly
+                if (_client.ConnectionState != ConnectionState.Disconnected)
                 {
-                    LogUtil.LogText("Client reconnected automatically.");
-                    return; // Already reconnected
+                    await _client.StopAsync().ConfigureAwait(false);
+                    await Task.Delay(2000, cancellationToken).ConfigureAwait(false);
                 }
 
-                // Check if the client is in the process of reconnecting
-                if (_client.ConnectionState == ConnectionState.Connecting)
-                {
-                    LogUtil.LogText("Client is already attempting to reconnect.");
-                    await Task.Delay(delayBetweenRetries).ConfigureAwait(false);
-                    continue;
-                }
-
-                await _client.LoginAsync(TokenType.Bot, Hub.Config.Discord.Token).ConfigureAwait(false);
+                // Restart the bot
                 await _client.StartAsync().ConfigureAwait(false);
-                LogUtil.LogText("Reconnected successfully.");
-                return;
+                LogUtil.LogText("Bot restarted successfully.");
             }
             catch (Exception ex)
             {
-                LogUtil.LogText($"Reconnection attempt {i + 1} failed: {ex.Message}");
-                if (i < maxRetries - 1)
-                    await Task.Delay(delayBetweenRetries).ConfigureAwait(false);
+                LogUtil.LogText($"Failed to restart bot: {ex.Message}");
             }
         }
-
-        // If all attempts to reconnect fail, stop and restart the bot
-        LogUtil.LogText("Failed to reconnect after maximum attempts. Restarting the bot...");
-
-        // Stop the bot
-        await _client.StopAsync().ConfigureAwait(false);
-
-        // Restart the bot
-        await _client.LoginAsync(TokenType.Bot, Hub.Config.Discord.Token).ConfigureAwait(false);
-        await _client.StartAsync().ConfigureAwait(false);
-
-        LogUtil.LogText("Bot restarted successfully.");
+        catch (OperationCanceledException)
+        {
+            LogUtil.LogText("Reconnection cancelled.");
+        }
+        catch (Exception ex)
+        {
+            LogUtil.LogText($"Unexpected error in ReconnectAsync: {ex.Message}");
+        }
+        finally
+        {
+            _reconnectSemaphore.Release();
+        }
     }
 
     public async Task AnnounceBotStatus(string status, EmbedColorOption color)
@@ -174,8 +274,8 @@ public sealed class SysCord<T> where T : PKM, new()
         var botName = string.IsNullOrEmpty(SysCordSettings.HubConfig.BotName) ? "SysBot" : SysCordSettings.HubConfig.BotName;
         var fullStatusMessage = $"**Status**: {botName} is {status}!";
         var thumbnailUrl = status == "Online"
-            ? "https://raw.githubusercontent.com/hexbyt3/sprites/main/botgo.png"
-            : "https://raw.githubusercontent.com/hexbyt3/sprites/main/botstop.png";
+            ? "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/botgo.png"
+            : "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/botstop.png";
 
         var embed = new EmbedBuilder()
             .WithTitle("Bot Status Report")
@@ -274,6 +374,34 @@ public sealed class SysCord<T> where T : PKM, new()
         }
     }
 
+    private void InitializeRecoveryNotifications()
+    {
+        if (!Hub.Config.Recovery.EnableRecovery)
+            return;
+
+        // Get the recovery service from the runner
+        var recoveryService = Runner.GetRecoveryService();
+        if (recoveryService == null)
+            return;
+
+        // Determine the notification channel
+        ulong? notificationChannelId = null;
+        if (Manager.WhitelistedChannels.List.Count > 0)
+        {
+            // Use the first whitelisted channel for notifications
+            notificationChannelId = Manager.WhitelistedChannels.List[0].ID;
+        }
+
+        // Initialize the recovery notification helper
+        var hubName = string.IsNullOrEmpty(Hub.Config.BotName) ? "SysBot" : Hub.Config.BotName;
+        RecoveryNotificationHelper.Initialize(_client, notificationChannelId, hubName);
+        
+        // Hook up the recovery events
+        RecoveryNotificationHelper.HookRecoveryEvents(recoveryService);
+        
+        LogUtil.LogInfo("Recovery notifications initialized for Discord", "Recovery");
+    }
+
     public async Task InitCommands()
     {
         var assembly = Assembly.GetExecutingAssembly();
@@ -302,8 +430,13 @@ public sealed class SysCord<T> where T : PKM, new()
         }
 
         // Subscribe a handler to see if a message invokes a command.
-        _client.Ready += LoadLoggingAndEcho;
-        _client.MessageReceived += HandleMessageAsync;
+        // Guard to prevent duplicate event handler registration
+        if (!_handlersRegistered)
+        {
+            _client.Ready += LoadLoggingAndEcho;
+            _client.MessageReceived += HandleMessageAsync;
+            _handlersRegistered = true;
+        }
     }
 
     public async Task MainAsync(string apiToken, CancellationToken token)
@@ -317,11 +450,9 @@ public sealed class SysCord<T> where T : PKM, new()
 
         var app = await _client.GetApplicationInfoAsync().ConfigureAwait(false);
         Manager.Owner = app.Owner.Id;
-        if (!await TradeQueueResult.InitializeTradeQueueAsync(_client).ConfigureAwait(false))
-        {
-            await Task.Delay(3000, token);
-            return;
-        }
+
+        // Initialize recovery notifications if recovery is enabled
+        InitializeRecoveryNotifications();
         try
         {
             // Wait infinitely so your bot actually stays connected.
@@ -336,10 +467,19 @@ public sealed class SysCord<T> where T : PKM, new()
         }
         finally
         {
+            // Cancel any ongoing reconnection attempts
+            _reconnectCts?.Cancel();
+
             // Disconnect the bot
             await _client.StopAsync();
+
+            // Dispose resources
+            _reconnectCts?.Dispose();
+            _reconnectSemaphore?.Dispose();
+            _client?.Dispose();
         }
     }
+
     // If any services require the client, or the CommandService, or something else you keep on hand,
     // pass them as parameters into this method as needed.
     // If this method is getting pretty long, you can separate it out into another file using partials.
@@ -518,6 +658,12 @@ public sealed class SysCord<T> where T : PKM, new()
         // Restore Echoes
         EchoModule.RestoreChannels(_client, Hub.Config.Discord);
 
+        // Subscribe to queue status changes
+        QueueMonitor<T>.OnQueueStatusChanged = async (isFull, currentCount, maxCount) =>
+        {
+            await EchoModule.SendQueueStatusEmbedAsync(isFull, currentCount, maxCount).ConfigureAwait(false);
+        };
+
         // Restore Logging
         LogModule.RestoreLogging(_client, Hub.Config.Discord);
         TradeStartModule<T>.RestoreTradeStarting(_client);
@@ -624,7 +770,7 @@ public sealed class SysCord<T> where T : PKM, new()
                 return false;
 
             if (!result.IsSuccess)
-                await SysCord<T>.SafeSendMessageAsync(msg.Channel, result.ErrorReason).ConfigureAwait(false);
+                await SafeSendMessageAsync(msg.Channel, result.ErrorReason).ConfigureAwait(false);
 
             return true;
         }
