@@ -8,14 +8,15 @@ namespace SysBot.Pokemon.Discord;
 
 public static class EmbedHelper
 {
+    static readonly string XGC_Thumbnail = "https://github.com/Xieons-Gaming-Corner/public/blob/main/assets/xgc.png?raw=true";
+
     public static async Task SendNotificationEmbedAsync(IUser user, string message)
     {
         var embed = new EmbedBuilder()
             .WithTitle("Notice")
             .WithDescription(message)
             .WithTimestamp(DateTimeOffset.Now)
-            .WithThumbnailUrl("https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/exclamation.gif")
-            .WithColor(Color.Red)
+            .WithThumbnailUrl("{XGC_Thumbnail}")
             .Build();
 
         await user.SendMessageAsync(embed: embed).ConfigureAwait(false);
@@ -27,7 +28,7 @@ public static class EmbedHelper
             .WithTitle("Your Trade was Canceled...")
             .WithDescription($"Your trade was canceled.\nPlease try again. If the issue persists, restart your switch and check your internet connection.\n\n**Reason**: {reason}")
             .WithTimestamp(DateTimeOffset.Now)
-            .WithThumbnailUrl("https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/dm-uhoherror.gif")
+            .WithThumbnailUrl("{XGC_Thumbnail}")            
             .WithColor(Color.Red)
             .Build();
 
@@ -40,7 +41,7 @@ public static class EmbedHelper
             .WithTitle("Here's your trade code!")
             .WithDescription($"# {code:0000 0000}")
             .WithTimestamp(DateTimeOffset.Now)
-            .WithThumbnailUrl("https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/dm-tradecode.gif")
+            .WithThumbnailUrl("{XGC_Thumbnail}")
             .WithColor(Color.Blue)
             .Build();
 
@@ -65,7 +66,7 @@ public static class EmbedHelper
             .WithTitle("Trade Completed!")
             .WithDescription(message)
             .WithTimestamp(DateTimeOffset.Now)
-            .WithThumbnailUrl(thumbnailUrl)
+            .WithThumbnailUrl("{XGC_Thumbnail}")
             .WithColor(Color.Teal)
             .Build();
 
@@ -83,7 +84,7 @@ public static class EmbedHelper
             .WithTitle("Loading the Trade Portal...")
             .WithDescription($"**Pokemon**: {speciesName}\n**Trade Code**: {code:0000 0000}")
             .WithTimestamp(DateTimeOffset.Now)
-            .WithThumbnailUrl("https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/dm-initializingbot.gif")
+            .WithThumbnailUrl("{XGC_Thumbnail}")
             .WithColor(Color.Orange);
 
         if (!string.IsNullOrEmpty(message))
@@ -101,7 +102,7 @@ public static class EmbedHelper
             .WithTitle($"Now Searching for You, {trainerName}...")
             .WithDescription($"**Waiting for**: {trainerName}\n**My IGN**: {inGameName}")
             .WithTimestamp(DateTimeOffset.Now)
-            .WithThumbnailUrl("https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/dm-nowsearching.gif")
+            .WithThumbnailUrl("{XGC_Thumbnail}")            
             .WithColor(Color.Green);
 
         if (!string.IsNullOrEmpty(message))
