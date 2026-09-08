@@ -729,7 +729,14 @@ public static class QueueHelper<T> where T : PKM, new()
                 .WithThumbnailUrl(imageUrl)
                 .Build();
 
-            await channel.SendMessageAsync(embed: embed).ConfigureAwait(false);
+            try
+            {
+                await channel.SendMessageAsync(embed: embed).ConfigureAwait(false);
+            }
+            catch (HttpException ex)
+            {
+                Base.LogUtil.LogError(ex.Message, nameof(QueueHelper<T>));
+            }
         }
     }
 
@@ -810,6 +817,7 @@ public static class QueueHelper<T> where T : PKM, new()
 
     private static async Task HandleDiscordExceptionAsync(SocketCommandContext context, SocketUser trader, HttpException ex)
     {
+        var location = DiscordLogUtil.GetChannelLocation(context);
         string message = string.Empty;
         switch (ex.DiscordCode)
         {
@@ -819,7 +827,7 @@ public static class QueueHelper<T> where T : PKM, new()
                     if (!permissions.SendMessages)
                     {
                         message = "You must grant me \"Send Messages\" permissions!";
-                        Base.LogUtil.LogError("QueueHelper", message);
+                        Base.LogUtil.LogError($"Missing \"Send Messages\" permission. {location}", nameof(QueueHelper<T>));
                         return;
                     }
                     if (!permissions.ManageMessages)
@@ -828,6 +836,7 @@ public static class QueueHelper<T> where T : PKM, new()
                         var owner = app.Owner.Id;
                         message = $"<@{owner}> You must grant me \"Manage Messages\" permissions!";
                     }
+                    Base.LogUtil.LogError($"Missing permissions (Discord code {(int?)ex.DiscordCode}). {location}", nameof(QueueHelper<T>));
                 }
                 break;
 
@@ -843,7 +852,16 @@ public static class QueueHelper<T> where T : PKM, new()
                 }
                 break;
         }
-        await context.Channel.SendMessageAsync(message).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(message))
+            return;
+        try
+        {
+            await context.Channel.SendMessageAsync(message).ConfigureAwait(false);
+        }
+        catch (HttpException httpEx)
+        {
+            Base.LogUtil.LogError($"Unable to send message to channel ({(int?)httpEx.DiscordCode ?? (int)httpEx.HttpCode}: {httpEx.Reason}). {location}", nameof(QueueHelper<T>));
+        }
     }
 
     private static string GetEggTypeImageUrl(T pk)

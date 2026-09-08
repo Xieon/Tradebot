@@ -34,6 +34,8 @@ public interface IPokeBotRunner
 
     bool SupportsRoutine(PokeRoutineType pokeRoutineType);
 
+    BotRecoveryService<PokeBotState>? GetRecoveryService();
+
     event EventHandler BotStopped;
 }
 
@@ -123,11 +125,17 @@ public abstract class PokeBotRunner<T> : RecoverableBotRunner<PokeBotState>, IPo
             RecoverIntentionalStops = Hub.Config.Recovery.RecoverIntentionalStops,
             MinimumStableUptimeSeconds = Hub.Config.Recovery.MinimumStableUptimeSeconds,
             NotifyOnRecoveryAttempt = Hub.Config.Recovery.NotifyOnRecoveryAttempt,
-            NotifyOnRecoveryFailure = Hub.Config.Recovery.NotifyOnRecoveryFailure
+            NotifyOnRecoveryFailure = Hub.Config.Recovery.NotifyOnRecoveryFailure,
+            FrozenBotTimeoutMinutes = Hub.Config.Recovery.FrozenBotTimeoutMinutes,
         };
 
         InitializeRecovery(recoveryConfig);
-        
+
+        // Bots may have been added before StartAll() was called (e.g. via form UI at startup),
+        // so _recoveryService was null at Add() time and they were created as plain BotSource<T>.
+        // Convert them now so they get registered with the recovery service.
+        ConvertToRecoverable();
+
         if (Hub.Config.Recovery.EnableRecovery)
         {
             LogUtil.LogInfo("Bot recovery system is enabled", "Recovery");

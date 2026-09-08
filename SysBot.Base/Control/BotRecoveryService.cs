@@ -112,6 +112,7 @@ public sealed class BotRecoveryService<T> : IDisposable where T : class, IConsol
     private async Task MonitorAndRecoverBots(CancellationToken cancellationToken)
     {
         var botsToRecover = new List<(BotSource<T> bot, BotRecoveryState state)>();
+        var frozenBots = new List<(BotSource<T> bot, TimeSpan silent)>();
 
         await _recoveryLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -132,14 +133,29 @@ public sealed class BotRecoveryService<T> : IDisposable where T : class, IConsol
                         state.IsRecovering = true;
                     }
                 }
-                else if (bot.IsRunning && state.ConsecutiveFailures > 0)
+                else if (bot.IsRunning && !state.IsRecovering)
                 {
-                    // Bot is running, check if it's been stable long enough to reset attempts
-                    var uptime = DateTime.UtcNow - state.LastStartTime;
-                    if (uptime.TotalSeconds >= _config.MinimumStableUptimeSeconds)
+                    // Check for frozen bot: running but no log activity for too long.
+                    // BotLastActivity is keyed by trainer identifier (e.g. "Lugia-245712"), but botName
+                    // is the connection name (e.g. "192.168.1.8"). Resolve via ConnectionToTrainerMap.
+                    var activityKey = LogUtil.ConnectionToTrainerMap.TryGetValue(botName, out var trainerKey) ? trainerKey : botName;
+                    if (_config.FrozenBotTimeoutMinutes > 0 &&
+                        LogUtil.BotLastActivity.TryGetValue(activityKey, out var lastActivity))
                     {
-                        state.ConsecutiveFailures = 0;
-                        LogUtil.LogInfo("Recovery", $"Bot {botName} has been stable for {uptime.TotalMinutes:F1} minutes. Resetting recovery attempts.");
+                        var silent = DateTime.Now - lastActivity;
+                        if (silent.TotalMinutes >= _config.FrozenBotTimeoutMinutes)
+                            frozenBots.Add((bot, silent));
+                    }
+
+                    // Bot is running — check if stable long enough to reset failure counter
+                    if (state.ConsecutiveFailures > 0)
+                    {
+                        var uptime = DateTime.UtcNow - state.LastStartTime;
+                        if (uptime.TotalSeconds >= _config.MinimumStableUptimeSeconds)
+                        {
+                            state.ConsecutiveFailures = 0;
+                            LogUtil.LogInfo("Recovery", $"Bot {botName} has been stable for {uptime.TotalMinutes:F1} minutes. Resetting recovery attempts.");
+                        }
                     }
                 }
             }
@@ -149,12 +165,31 @@ public sealed class BotRecoveryService<T> : IDisposable where T : class, IConsol
             _recoveryLock.Release();
         }
 
-        // Attempt recovery for crashed bots
+        // Force-stop frozen bots so the next monitor cycle restarts them
+        foreach (var (bot, silent) in frozenBots)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            var botName = bot.Bot.Connection.Name;
+            LogUtil.LogError($"Bot {botName} has been silent for {silent.TotalMinutes:F0} minutes (threshold: {_config.FrozenBotTimeoutMinutes} min). Force-stopping for recovery.", "Recovery");
+
+            try
+            {
+                bot.Stop();
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"Failed to force-stop frozen bot {botName}: {ex.Message}", "Recovery");
+            }
+        }
+
+        // Attempt recovery for crashed/stopped bots
         foreach (var (bot, state) in botsToRecover)
         {
             if (cancellationToken.IsCancellationRequested)
                 break;
-                
+
             await AttemptRecovery(bot, state, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -169,21 +204,32 @@ public sealed class BotRecoveryService<T> : IDisposable where T : class, IConsol
             return false;
         }
 
-        // Check if we've exceeded max attempts
+        // Check if we've exceeded max attempts — log once then mark intentionally stopped
+        // to prevent the monitor from re-evaluating (and spamming) every 5 seconds.
         if (state.ConsecutiveFailures >= _config.MaxRecoveryAttempts)
         {
-            LogUtil.LogError($"Bot {botName} has exceeded maximum recovery attempts ({_config.MaxRecoveryAttempts})", "Recovery");
+            if (!state.IsIntentionallyStopped)
+            {
+                LogUtil.LogError($"Bot {botName} has exceeded maximum recovery attempts ({_config.MaxRecoveryAttempts})", "Recovery");
+                state.IsIntentionallyStopped = true;
+            }
             return false;
         }
 
+        // If recovery was already disabled due to a crash loop, stay quiet — don't
+        // re-log or re-evaluate every monitor tick.
+        if (state.RecoveryDisabled)
+            return false;
+
         // Clean up old crash history
-        state.RemoveOldCrashes(crash => 
+        state.RemoveOldCrashes(crash =>
             (DateTime.UtcNow - crash).TotalMinutes > _config.CrashHistoryWindowMinutes);
 
         // Check crash frequency
         if (state.CrashHistory.Count >= _config.MaxCrashesInWindow)
         {
             LogUtil.LogError($"Bot {botName} has crashed {state.CrashHistory.Count} times in the last {_config.CrashHistoryWindowMinutes} minutes. Disabling recovery.", "Recovery");
+            state.RecoveryDisabled = true;
             return false;
         }
 
@@ -249,6 +295,11 @@ public sealed class BotRecoveryService<T> : IDisposable where T : class, IConsol
                     bot.Start();
                     state.LastStartTime = DateTime.UtcNow;
                     state.IsIntentionallyStopped = false;
+
+                    // Reset the activity timestamp so the frozen-bot watchdog doesn't
+                    // immediately re-fire on the next monitor tick after a successful restart.
+                    var activityKey = LogUtil.ConnectionToTrainerMap.TryGetValue(botName, out var trainerKey) ? trainerKey : botName;
+                    LogUtil.BotLastActivity[activityKey] = DateTime.Now;
                 }
                 catch (Exception ex)
                 {
@@ -340,6 +391,7 @@ public sealed class BotRecoveryService<T> : IDisposable where T : class, IConsol
             state.ClearCrashHistory();
             state.LastRecoveryAttempt = null;
             state.IsRecovering = false;
+            state.RecoveryDisabled = false;
         }
     }
     
@@ -372,12 +424,16 @@ public class RecoveryConfiguration
     public int InitialRecoveryDelaySeconds { get; set; } = 5;
     public int MaxRecoveryDelaySeconds { get; set; } = 300;
     public double BackoffMultiplier { get; set; } = 2.0;
-    public int CrashHistoryWindowMinutes { get; set; } = 60;
+    public int CrashHistoryWindowMinutes { get; set; } = 30;
     public int MaxCrashesInWindow { get; set; } = 5;
     public bool RecoverIntentionalStops { get; set; } = false;
     public int MinimumStableUptimeSeconds { get; set; } = 600;
     public bool NotifyOnRecoveryAttempt { get; set; } = true;
     public bool NotifyOnRecoveryFailure { get; set; } = true;
+    /// <summary>
+    /// Minutes of silence before a running bot is force-stopped. 0 = watchdog disabled.
+    /// </summary>
+    public int FrozenBotTimeoutMinutes { get; set; } = 15;
 }
 
 /// <summary>
@@ -401,6 +457,13 @@ public class BotRecoveryState
     public DateTime? LastRecoveryAttempt { get; set; }
     public DateTime LastStartTime { get; set; }
     public bool IsIntentionallyStopped { get; set; }
+
+    /// <summary>
+    /// Set once a bot exceeds the crash-frequency threshold within the history window.
+    /// While true, the monitor skips this bot entirely instead of re-evaluating and
+    /// re-logging every tick. Cleared by <see cref="BotRecoveryService{T}.ResetRecoveryState"/>.
+    /// </summary>
+    public bool RecoveryDisabled { get; set; }
     
     public bool IsRecovering 
     { 

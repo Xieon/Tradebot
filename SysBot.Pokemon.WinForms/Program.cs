@@ -1,5 +1,7 @@
+using SysBot.Base;
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace SysBot.Pokemon.WinForms;
@@ -16,6 +18,27 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        // Catch unhandled exceptions on background threads — these would otherwise silently terminate the process.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            var ex = e.ExceptionObject as Exception;
+            var msg = ex != null ? $"{ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}" : e.ExceptionObject?.ToString() ?? "Unknown";
+            LogUtil.LogError($"FATAL unhandled exception (terminating={e.IsTerminating}):\n{msg}", "Program");
+            try { File.AppendAllText(Path.Combine(WorkingDirectory, "crash.log"), $"[{DateTime.Now}] FATAL:\n{msg}\n\n"); } catch { }
+        };
+
+        // Catch unobserved task exceptions (async code that faults without being awaited).
+        // NOTE: by the time this fires (on the finalizer thread), the original Discord.NET
+        // guild/channel context is gone. If this keeps firing, find the fire-and-forget
+        // Task.Run/ContinueWith at the inner exception's stack trace location and wrap it in its
+        // own try/catch that logs guild/channel IDs before the exception can go unobserved again.
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            foreach (var inner in e.Exception.Flatten().InnerExceptions)
+                LogUtil.LogError($"Unobserved task exception: {inner.GetType().Name}: {inner.Message}\n{inner.StackTrace}", "Program");
+            e.SetObserved(); // Prevent process termination
+        };
+
 #if NETCOREAPP
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
 #endif

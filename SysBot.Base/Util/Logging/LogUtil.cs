@@ -66,6 +66,18 @@ public static class LogUtil
     public static DateTime LastLogged { get; private set; } = DateTime.Now;
 
     /// <summary>
+    /// Tracks the last time each bot logged a message, keyed by bot identity (e.g. "Lugia-245712").
+    /// Used by the watchdog to detect frozen-but-still-running bots.
+    /// </summary>
+    public static readonly ConcurrentDictionary<string, DateTime> BotLastActivity = new();
+
+    /// <summary>
+    /// Maps connection name (IP/USB) to trainer identifier (e.g. "192.168.1.8" -> "Roaring Moon-536394").
+    /// Populated when a bot is identified. Used by the watchdog to resolve the correct BotLastActivity key.
+    /// </summary>
+    public static readonly ConcurrentDictionary<string, string> ConnectionToTrainerMap = new();
+
+    /// <summary>
     /// Gets or creates a per-bot logger for the specified bot identity
     /// </summary>
     /// <param name="identity">Bot identifier (e.g., "USB-1", "192.168.1.100")</param>
@@ -174,6 +186,9 @@ public static class LogUtil
     /// </summary>
     public static void FlushBufferedLogs(string earlyIdentifier, string trainerIdentifier)
     {
+        // Record the connection → trainer mapping so the frozen-bot watchdog can resolve the correct BotLastActivity key
+        ConnectionToTrainerMap[earlyIdentifier] = trainerIdentifier;
+
         if (LogBuffer.TryRemove(earlyIdentifier, out var bufferedLogs))
         {
             var botLogger = GetOrCreateBotLogger(trainerIdentifier);
@@ -186,6 +201,10 @@ public static class LogUtil
 
     public static void LogError(string message, string identity)
     {
+        // Track last activity for watchdog (trainer-identified bots only)
+        if (IsTrainerIdentifier(identity))
+            BotLastActivity[identity] = DateTime.Now;
+
         // Log to master log
         if (LogConfig.EnableMasterLog)
             Logger.Log(LogLevel.Error, $"{identity} {message}");
@@ -220,6 +239,10 @@ public static class LogUtil
 
     public static void LogInfo(string message, string identity)
     {
+        // Track last activity for watchdog (trainer-identified bots only)
+        if (IsTrainerIdentifier(identity))
+            BotLastActivity[identity] = DateTime.Now;
+
         // Log to master log
         if (LogConfig.EnableMasterLog)
             Logger.Log(LogLevel.Info, $"{identity} {message}");

@@ -598,8 +598,8 @@ public class PokeTradeBotSWSH(PokeTradeHub<PK8> hub, PokeBotState config) : Poke
             if (result.ShouldAttemptRetry() && detail.Type != PokeTradeType.Random && !detail.IsRetry)
             {
                 detail.IsRetry = true;
-                hub.Queues.Enqueue(type, detail, Math.Min(priority, PokeTradePriorities.Tier2));
-                detail.SendNotification(this, "Oops! Something happened during your batch trade. I'll requeue you for another attempt.");
+                hub.Queues.Enqueue(type, detail, priority);
+                detail.SendNotification(this, "Oops! Something happened during your batch trade. Requeuing you for another attempt — your queue position is preserved.");
             }
             else
             {
@@ -620,8 +620,8 @@ public class PokeTradeBotSWSH(PokeTradeHub<PK8> hub, PokeBotState config) : Poke
         if (result.ShouldAttemptRetry() && detail.Type != PokeTradeType.Random && !detail.IsRetry)
         {
             detail.IsRetry = true;
-            hub.Queues.Enqueue(type, detail, Math.Min(priority, PokeTradePriorities.Tier2));
-            detail.SendNotification(this, "Oops! Something happened. I'll requeue you for another attempt.");
+            hub.Queues.Enqueue(type, detail, priority);
+            detail.SendNotification(this, "Oops! Something happened. Requeuing you for another attempt — your queue position is preserved.");
         }
         else
         {
@@ -816,9 +816,7 @@ public class PokeTradeBotSWSH(PokeTradeHub<PK8> hub, PokeBotState config) : Poke
         if (poke.Type == PokeTradeType.Seed && itemReq == SpecialTradeType.None)
         {
             // Immediately exit, we aren't trading anything.
-            poke.SendNotification(this, "No held item or valid request! Cancelling this trade.");
-            await ExitTrade(false, token).ConfigureAwait(false);
-            return PokeTradeResult.TrainerRequestBad;
+            return await EndSeedCheckTradeAsync(poke, offered, token).ConfigureAwait(false);
         }
 
         var trainer = new PartnerDataHolder(trainerNID, trainerName, trainerTID);

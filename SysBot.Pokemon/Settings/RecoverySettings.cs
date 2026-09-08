@@ -25,7 +25,7 @@ public class RecoverySettings
     public double BackoffMultiplier { get; set; } = 2.0;
 
     [Category(Recovery), Description("Time window in minutes to track crash history. Crashes outside this window are not counted.")]
-    public int CrashHistoryWindowMinutes { get; set; } = 60; // 1 hour
+    public int CrashHistoryWindowMinutes { get; set; } = 30;
 
     [Category(Recovery), Description("Maximum number of crashes allowed within the history window before permanent shutdown.")]
     public int MaxCrashesInWindow { get; set; } = 5;
@@ -44,6 +44,9 @@ public class RecoverySettings
 
     [Category(Recovery), Description("Minimum uptime in seconds before a bot is considered stable (resets recovery attempts).")]
     public int MinimumStableUptimeSeconds { get; set; } = 600; // 10 minutes
+
+    [Category(Recovery), Description("Minutes of inactivity before a running bot is considered frozen and force-stopped for recovery. Set to 0 to disable the watchdog.")]
+    public int FrozenBotTimeoutMinutes { get; set; } = 15;
 
     public override string ToString() => "Bot Recovery Settings";
 }
