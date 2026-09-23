@@ -2,11 +2,8 @@
   <ItemGroup>
     <PackageReference Include="FuzzySharp" Version="2.0.2" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="System.Drawing.Common" Version="9.0.4" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
     <ProjectReference Include="..\SysBot.Base\SysBot.Base.csproj" />
-  </ItemGroup>
-  <ItemGroup>
-    <Folder Include="deps\" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="PKHeX.Core">
@@ -23,6 +20,6 @@
     <DebugType>none</DebugType>
   </PropertyGroup>
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 </Project>

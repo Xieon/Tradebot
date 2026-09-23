@@ -41,9 +41,9 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
 
         // Close out of the game
         await Click(B, 0_500, token).ConfigureAwait(false);
-        await Click(HOME, 2_000 + timing.ClosingGameSettings.ExtraTimeReturnHome, token).ConfigureAwait(false);
+        await Click(HOME, 2_000 + timing.ExtraTimeReturnHome, token).ConfigureAwait(false);
         await Click(X, 1_000, token).ConfigureAwait(false);
-        await Click(A, 5_000 + timing.ClosingGameSettings.ExtraTimeCloseGame, token).ConfigureAwait(false);
+        await Click(A, 5_000 + timing.ExtraTimeCloseGame, token).ConfigureAwait(false);
         Log("Closed out of the game!");
     }
 
@@ -125,7 +125,7 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
             Log("Turning off screen.");
             await SetScreen(ScreenState.Off, token).ConfigureAwait(false);
         }
-
+        await SetController(ControllerType.ProController, token);
         Log("Setting SV-specific hid waits");
         await Connection.SendAsync(SwitchCommand.Configure(SwitchConfigureParameter.keySleepTime, KeyboardPressTime), token).ConfigureAwait(false);
         await Connection.SendAsync(SwitchCommand.Configure(SwitchConfigureParameter.pollRate, HidWaitTime), token).ConfigureAwait(false);
@@ -188,7 +188,7 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
 
     public async Task ReOpenGame(PokeTradeHubConfig config, CancellationToken token)
     {
-        Log("Error detected, restarting the game!!");
+        Log("Restarting the game...");
         await CloseGame(config, token).ConfigureAwait(false);
         await StartGame(config, token).ConfigureAwait(false);
     }
@@ -203,7 +203,9 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
         }
 
         pkm.ResetPartyStats();
-        return SwitchConnection.WriteBytesAbsoluteAsync(pkm.EncryptedBoxData, offset, token);
+        var boxData = new byte[pkm.SIZE_STORED];
+        pkm.WriteEncryptedDataStored(boxData);
+        return SwitchConnection.WriteBytesAbsoluteAsync(boxData, offset, token);
     }
 
     public Task SetCurrentBox(byte box, CancellationToken token)
@@ -214,12 +216,12 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
     public async Task StartGame(PokeTradeHubConfig config, CancellationToken token)
     {
         TimingSettings timing = config.Timings;
-        int loadPro = timing.OpeningGameSettings.ProfileSelectionRequired ? timing.OpeningGameSettings.ExtraTimeLoadProfile : 0;
+        int loadPro = timing.ProfileSelectionRequired ? timing.ExtraTimeLoadProfile : 0;
 
         // Menus here can go in the order: System Update Prompt -> Profile -> Checking if Game can be played (Digital Only) -> DLC check -> Unable to use DLC
         await Click(A, 1_000 + loadPro, token).ConfigureAwait(false); // Initial "A" Press to start the Game + a delay if needed for profiles to load
 
-        if (timing.MiscellaneousSettings.AvoidSystemUpdate)
+        if (timing.AvoidSystemUpdate)
         {
             await Task.Delay(0_500, token).ConfigureAwait(false); // Delay bc why not
             await Click(DUP, 0_600, token).ConfigureAwait(false); // Highlight "Start Software"
@@ -227,23 +229,23 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
         }
 
         // Only send extra Presses if we need to
-        if (timing.OpeningGameSettings.ProfileSelectionRequired)
+        if (timing.ProfileSelectionRequired)
         {
             await Click(A, 1_000, token).ConfigureAwait(false); // Now we are on the Profile Screen
             await Click(A, 1_000, token).ConfigureAwait(false); // Select the profile
         }
 
         // Digital game copies take longer to load
-        if (timing.OpeningGameSettings.CheckGameDelay)
+        if (timing.CheckGameDelay)
         {
-            await Task.Delay(2_000 + timing.OpeningGameSettings.ExtraTimeCheckGame, token).ConfigureAwait(false);
+            await Task.Delay(2_000 + timing.ExtraTimeCheckGame, token).ConfigureAwait(false);
         }
 
 
         Log("Restarting the game!");
 
         // Switch Logo and game load screen
-        await Task.Delay(15_000 + timing.OpeningGameSettings.ExtraTimeLoadGame, token).ConfigureAwait(false);
+        await Task.Delay(15_000 + timing.ExtraTimeLoadGame, token).ConfigureAwait(false);
 
         for (int i = 0; i < 8; i++)
         {
@@ -257,7 +259,7 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
             timer -= 1_000;
             // We haven't made it back to overworld after a minute, so press A every 6 seconds hoping to restart the game.
             // Don't risk it if hub is set to avoid updates.
-            if (timer <= 0 && !timing.MiscellaneousSettings.AvoidSystemUpdate)
+            if (timer <= 0 && !timing.AvoidSystemUpdate)
             {
                 Log("Still not in the game, initiating rescue protocol!");
                 while (!await IsOnOverworldTitle(token).ConfigureAwait(false))
@@ -269,33 +271,17 @@ public abstract class PokeRoutineExecutor9SV : PokeRoutineExecutor<PK9>
             }
         }
 
-        await Task.Delay(5_000 + timing.OpeningGameSettings.ExtraTimeLoadOverworld, token).ConfigureAwait(false);
+        await Task.Delay(5_000 + timing.ExtraTimeLoadOverworld, token).ConfigureAwait(false);
         Log("Back in the overworld!");
     }
 
     protected virtual async Task EnterLinkCode(int code, PokeTradeHubConfig config, CancellationToken token)
     {
-        if (config.UseKeyboard)
+        // Enter link code using directional arrows
+        foreach (var key in TradeUtil.GetPresses(code))
         {
-            // Enter link code using keyboard
-            char[] codeChars = $"{code:00000000}".ToCharArray();
-            HidKeyboardKey[] keysToPress = new HidKeyboardKey[codeChars.Length];
-            for (int i = 0; i < codeChars.Length; ++i)
-                keysToPress[i] = (HidKeyboardKey)Enum.Parse(typeof(HidKeyboardKey), (int)codeChars[i] >= (int)'A' && (int)codeChars[i] <= (int)'Z' ? $"{codeChars[i]}" : $"D{codeChars[i]}");
-
-            await Connection.SendAsync(SwitchCommand.TypeMultipleKeys(keysToPress), token).ConfigureAwait(false);
-            await Task.Delay((HidWaitTime * 8) + 0_200, token).ConfigureAwait(false);
-
-            // Confirm Code outside of this method (allow synchronization)
-        }
-        else
-        {
-            // Enter link code using directional arrows
-            foreach (var key in TradeUtil.GetPresses(code))
-            {
-                int delay = config.Timings.MiscellaneousSettings.KeypressTime;
-                await Click(key, delay, token).ConfigureAwait(false);
-            }
+            int delay = config.Timings.KeypressTime;
+            await Click(key, delay, token).ConfigureAwait(false);
         }
     }
 

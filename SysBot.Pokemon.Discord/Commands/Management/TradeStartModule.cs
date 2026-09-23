@@ -1,5 +1,6 @@
 using Discord;
 using Discord.Commands;
+using Discord.Net;
 using Discord.WebSocket;
 using PKHeX.Core;
 using SysBot.Base;
@@ -43,7 +44,7 @@ public class TradeStartModule<T> : ModuleBase<SocketCommandContext> where T : PK
                 AddLogChannel(c, ch.ID);
         }
 
-        LogUtil.LogInfo("Added Trade Start Notification to Discord channel(s) on Bot startup.", "Discord");
+        LogUtil.LogInfo("Discord", "Added Trade Start Notification to Discord channel(s) on Bot startup.");
     }
 
     public static bool IsStartChannel(ulong cid)
@@ -84,14 +85,14 @@ public class TradeStartModule<T> : ModuleBase<SocketCommandContext> where T : PK
             if (user == null) { Console.WriteLine($"User not found for ID {detail.Trainer.ID}."); return; }
 
             string speciesName = detail.TradeData != null ? GameInfo.Strings.Species[detail.TradeData.Species] : "";
-            string ballImgUrl = "https://raw.githubusercontent.com/hexbyt3/sprites/36e891cc02fe283cd70d9fc8fef2f3c490096d6c/imgs/difficulty.png";
+            string ballImgUrl = "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/imgs/difficulty.png";
 
             if (detail.TradeData != null && detail.Type != PokeTradeType.Clone && detail.Type != PokeTradeType.Dump && detail.Type != PokeTradeType.Seed && detail.Type != PokeTradeType.FixOT)
             {
                 var ballName = GameInfo.GetStrings("en").balllist[detail.TradeData.Ball]
                     .Replace(" ", "").Replace("(LA)", "").ToLower();
                 ballName = ballName == "pokéball" ? "pokeball" : (ballName.Contains("(la)") ? "la" + ballName : ballName);
-                ballImgUrl = $"https://raw.githubusercontent.com/hexbyt3/sprites/main/AltBallImg/28x28/{ballName}.png";
+                ballImgUrl = $"https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/AltBallImg/28x28/{ballName}.png";
             }
 
             string tradeTitle = detail.IsMysteryEgg ? "✨ Mystery Egg" : detail.Type switch
@@ -103,12 +104,12 @@ public class TradeStartModule<T> : ModuleBase<SocketCommandContext> where T : PK
                 _ => speciesName
             };
 
-            string embedImageUrl = detail.IsMysteryEgg ? "https://raw.githubusercontent.com/hexbyt3/sprites/main/mysteryegg3.png" : detail.Type switch
+            string embedImageUrl = detail.IsMysteryEgg ? "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/mysteryegg3.png" : detail.Type switch
             {
-                PokeTradeType.Clone => "https://raw.githubusercontent.com/hexbyt3/sprites/main/clonepod.png",
-                PokeTradeType.Dump => "https://raw.githubusercontent.com/hexbyt3/sprites/main/AltBallImg/128x128/dumpball.png",
-                PokeTradeType.FixOT => "https://raw.githubusercontent.com/hexbyt3/sprites/main/AltBallImg/128x128/rocketball.png",
-                PokeTradeType.Seed => "https://raw.githubusercontent.com/hexbyt3/sprites/main/specialrequest.png",
+                PokeTradeType.Clone => "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/clonepod.png",
+                PokeTradeType.Dump => "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/AltBallImg/128x128/dumpball.png",
+                PokeTradeType.FixOT => "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/AltBallImg/128x128/rocketball.png",
+                PokeTradeType.Seed => "https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/specialrequest.png",
                 _ => detail.TradeData != null ? TradeExtensions<T>.PokeImg(detail.TradeData, false, true) : ""
             };
 
@@ -127,7 +128,21 @@ public class TradeStartModule<T> : ModuleBase<SocketCommandContext> where T : PK
                 .WithTimestamp(DateTime.Now)
                 .Build();
 
-            await c.SendMessageAsync(embed: embed);
+            try
+            {
+                await c.SendMessageAsync(embed: embed).ConfigureAwait(false);
+            }
+            catch (HttpException ex) when (ex.HttpCode is System.Net.HttpStatusCode.ServiceUnavailable
+                                                       or System.Net.HttpStatusCode.GatewayTimeout
+                                                       or System.Net.HttpStatusCode.BadGateway)
+            {
+                // Discord is temporarily unavailable; skip this notification rather than crashing.
+                LogUtil.LogError($"Trade start notification skipped (Discord {(int)ex.HttpCode}): {ex.Message}", "TradeStartModule");
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError($"Trade start notification failed: {ex.Message}", "TradeStartModule");
+            }
         }
 
         SysCord<T>.Runner.Hub.Queues.Forwarders.Add(Logger);

@@ -1,4 +1,5 @@
 using Discord;
+using Discord.Net;
 using Discord.WebSocket;
 using PKHeX.Core;
 using SysBot.Base;
@@ -7,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace SysBot.Pokemon.Discord;
@@ -19,7 +21,7 @@ public static class ReusableActions
     {
         // Announce it in the channel the command was entered only if it's not already an echo channel.
         EchoUtil.Echo(msg);
-        if (!EchoModule.IsEchoChannel(channel) && !EchoModule.IsAbuseEchoChannel(channel))
+        if (!EchoModule.IsEchoChannel(channel))
             await channel.SendMessageAsync(msg).ConfigureAwait(false);
     }
 
@@ -106,15 +108,29 @@ public static class ReusableActions
 
         _ = Task.Run(async () =>
         {
-            await Task.Delay(2000).ConfigureAwait(false);
-            await userMessage.DeleteAsync().ConfigureAwait(false);
+            try
+            {
+                if (userMessage.Channel is IDMChannel)
+                    return;
+                await Task.Delay(2000).ConfigureAwait(false);
+                await userMessage.DeleteAsync().ConfigureAwait(false);
+            }
+            catch (HttpException) { }
+            catch (Exception ex) { LogUtil.LogSafe(ex, nameof(ReusableActions)); }
         });
 
         _ = Task.Run(async () =>
         {
-            await Task.Delay(20000).ConfigureAwait(false);
-            await botMessage.DeleteAsync().ConfigureAwait(false);
-            await warningMessage.DeleteAsync().ConfigureAwait(false);
+            try
+            {
+                if (botMessage.Channel is IDMChannel)
+                    return;
+                await Task.Delay(20000).ConfigureAwait(false);
+                await botMessage.DeleteAsync().ConfigureAwait(false);
+                await warningMessage.DeleteAsync().ConfigureAwait(false);
+            }
+            catch (HttpException) { }
+            catch (Exception ex) { LogUtil.LogSafe(ex, nameof(ReusableActions)); }
         });
     }
 
@@ -128,7 +144,9 @@ public static class ReusableActions
         try
         {
             // Write the file
-            await File.WriteAllBytesAsync(tmp, pkm.DecryptedPartyData);
+            var decryptedData = new byte[pkm.SIZE_PARTY];
+            pkm.WriteDecryptedDataParty(decryptedData);
+            await File.WriteAllBytesAsync(tmp, decryptedData);
 
             // Send the file and WAIT for it to complete
             await channel.SendFileAsync(tmp, msg);
@@ -161,7 +179,9 @@ public static class ReusableActions
         try
         {
             // Write the file
-            await File.WriteAllBytesAsync(tmp, pkm.DecryptedPartyData);
+            var decryptedData = new byte[pkm.SIZE_PARTY];
+            pkm.WriteDecryptedDataParty(decryptedData);
+            await File.WriteAllBytesAsync(tmp, decryptedData);
 
             // Send the file and WAIT for it to complete
             await user.SendFileAsync(tmp, msg);
@@ -184,9 +204,15 @@ public static class ReusableActions
         }
     }
 
-    public static string StripCodeBlock(string str) => str
-        .Replace("`\n", "")
-        .Replace("\n`", "")
-        .Replace("`", "")
-        .Trim();
+    public static string StripCodeBlock(string str)
+    {
+        str = str
+            .Replace("`\n", "")
+            .Replace("\n`", "")
+            .Replace("`", "")
+            .Trim();
+        // Convert .Version= batch instruction to ~=Version= encounter filter so users can write
+        // ".Version=X" and have it correctly restrict the encounter search to that game version.
+        return Regex.Replace(str, @"(?m)^\s*\.Version=", "~=Version=", RegexOptions.IgnoreCase);
+    }
 }

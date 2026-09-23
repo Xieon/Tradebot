@@ -110,6 +110,9 @@ public class DiscordSettings
     [Category(Channels), Description("Channel IDs that will echo the log bot data.")]
     public RemoteControlAccessList LoggingChannels { get; set; } = new();
 
+    [Category(Channels), Description("User ID or Channel ID to forward bot DMs to. Leave empty to disable.")]
+    public string UserDMsToBotForwarder { get; set; } = string.Empty;
+
     [Category(Startup), Description("List of modules that will not be loaded when the bot is started (comma separated).")]
     public string ModuleBlacklist { get; set; } = string.Empty;
 
@@ -127,6 +130,15 @@ public class DiscordSettings
 
     [Category(Operation), Description("Returns PKMs of Pokémon shown in the trade to the user.")]
     public bool ReturnPKMs { get; set; } = true;
+
+    [Category(Operation), Description("When enabled, the bot will automatically delete error messages and user commands after a delay. Disable to keep all messages permanently.")]
+    public bool MessageDeletionEnabled { get; set; } = true;
+
+    [Category(Operation), Description("Number of seconds to wait before deleting bot error/response messages. Only applies if MessageDeletionEnabled is true.")]
+    public int ErrorMessageDeleteDelaySeconds { get; set; } = 12;
+
+    [Category(Operation), Description("When enabled, user command messages will be deleted along with bot responses. Disable to keep user commands visible.")]
+    public bool DeleteUserCommandMessages { get; set; } = true;
 
     [Category(Roles), Description("Users with this role are allowed to enter the Clone queue.")]
     public RemoteControlAccessList RoleCanClone { get; set; } = new() { AllowIfEmpty = true };

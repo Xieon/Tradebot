@@ -1,8 +1,10 @@
 using Discord;
+using Discord.Net;
 using Discord.WebSocket;
 using PKHeX.Core;
 using PKHeX.Core.AutoMod;
 using PKHeX.Drawing.PokeSprite;
+using SysBot.Base;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -13,15 +15,14 @@ using Color = Discord.Color;
 
 namespace SysBot.Pokemon.Discord;
 
-public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
+public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>, IDisposable
     where T : PKM, new()
 {
     private T Data { get; set; }
     private PokeTradeTrainerInfo Info { get; }
     private int Code { get; }
-    private List<Pictocodes>? LGCode { get; }
+    private List<Pictocodes> LGCode { get; }
     private SocketUser Trader { get; }
-
     private int BatchTradeNumber { get; set; }
     private int TotalBatchTrades { get; }
     private bool IsMysteryEgg { get; }
@@ -37,7 +38,7 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
 
     public readonly PokeTradeHub<T> Hub = SysCord<T>.Runner.Hub;
 
-    public DiscordTradeNotifier(T data, PokeTradeTrainerInfo info, int code, SocketUser trader, int batchTradeNumber, int totalBatchTrades, bool isMysteryEgg, List<Pictocodes>? lgcode)
+    public DiscordTradeNotifier(T data, PokeTradeTrainerInfo info, int code, SocketUser trader, int batchTradeNumber, int totalBatchTrades, bool isMysteryEgg, List<Pictocodes> lgcode)
     {
         Data = data;
         Info = info;
@@ -48,10 +49,34 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
         IsMysteryEgg = isMysteryEgg;
         LGCode = lgcode;
         _traderID = trader.Id;
-        _uniqueTradeID = DiscordTradeNotifier<T>.GetUniqueTradeID();
+        _uniqueTradeID = GetUniqueTradeID();
     }
 
     public Action<PokeRoutineExecutor<T>>? OnFinish { private get; set; }
+
+    private static void FireAndForget(Func<Task> taskFactory, int maxRetries = 2)
+        => _ = FireAndForgetAsync(taskFactory, maxRetries);
+
+    private static async Task FireAndForgetAsync(Func<Task> taskFactory, int maxRetries)
+    {
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                await taskFactory().ConfigureAwait(false);
+                return;
+            }
+            catch (HttpException ex) when ((int?)ex.DiscordCode == 40003 && attempt < maxRetries)
+            {
+                await Task.Delay(2_000 * (attempt + 1)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError(ex.Message, "DiscordNotifier");
+                return;
+            }
+        }
+    }
 
     public void UpdateBatchProgress(int currentBatchNumber, T currentPokemon, int uniqueTradeID)
     {
@@ -60,7 +85,12 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
         _uniqueTradeID = uniqueTradeID;
     }
 
-    private static int GetUniqueTradeID()
+    public void UpdateUniqueTradeID(int uniqueTradeID)
+    {
+        _uniqueTradeID = uniqueTradeID;
+    }
+
+    private int GetUniqueTradeID()
     {
         // Generate a unique trade ID using timestamp or another method
         return (int)(DateTime.UtcNow.Ticks % int.MaxValue);
@@ -73,71 +103,56 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
 
         _isTradeActive = true;
 
-        // Create a new timer that sends queue position updates every minute
+        // Create a new timer that checks if user is up next
+        // Only sends ONE notification when they're truly up next to avoid Discord spam
         _periodicUpdateTimer = new Timer(async _ =>
         {
-            if (!_isTradeActive)
-                return;
-
-            // Check the current position using the unique trade ID
-            var position = Hub.Queues.Info.CheckPosition(_traderID, _uniqueTradeID, PokeRoutineType.LinkTrade);
-            if (!position.InQueue)
-                return;
-
-            var currentPosition = position.Position < 1 ? 1 : position.Position;
-
-            // Store the latest position for future reference
-            _lastReportedPosition = currentPosition;
-
-            var botct = Hub.Bots.Count;
-            var currentETA = currentPosition > botct ? Hub.Config.Queues.EstimateDelay(currentPosition, botct) : 0;
-
-            // Only send update if the trade is still in queue (not being processed)
-            if (position.InQueue && position.Detail != null)
+            try
             {
-                // Check if the trade is ready to be processed (next in line)
-                bool isNextInLine = currentPosition <= botct;
+                if (!_isTradeActive)
+                    return;
 
-                if (isNextInLine && currentPosition <= 2 && _initialUpdateSent && !_almostUpNotificationSent)
+                // Check the current position using the unique trade ID
+                var position = Hub.Queues.Info.CheckPosition(_traderID, _uniqueTradeID, PokeRoutineType.LinkTrade);
+                if (!position.InQueue)
+                    return;
+
+                var currentPosition = position.Position < 1 ? 1 : position.Position;
+
+                // Store the latest position for future reference
+                _lastReportedPosition = currentPosition;
+
+                // Only send ONE notification when the user is truly up next (position 1 or ready to be processed)
+                if (position.InQueue && position.Detail != null)
                 {
-                    // Send a more prominent notification when user is getting close to their turn
-                    // Only send this notification once
-                    _almostUpNotificationSent = true;
-
-                    var batchInfo = TotalBatchTrades > 1 ? $"\n\n**Important:** This is a batch trade with {TotalBatchTrades} Pokémon. Please stay in the trade until all are completed!" : "";
-
-                    var almostUpEmbed = new EmbedBuilder
+                    // Only notify when position is 1 (truly up next) and we haven't sent the notification yet
+                    if (currentPosition == 1 && _initialUpdateSent && !_almostUpNotificationSent)
                     {
-                        Color = Color.Gold,
-                        Title = "🎯 You're Almost Up!",
-                        Description = $"Your trade will begin soon. Current queue position: **{currentPosition}**.{batchInfo}",
-                        Footer = new EmbedFooterBuilder
-                        {
-                            Text = $"Estimated wait time: {(currentETA > 0 ? $"{currentETA} minutes" : "Less than a minute")}"
-                        },
-                        Timestamp = DateTimeOffset.Now
-                    }.Build();
+                        // Send notification that they're up next - only sent ONCE
+                        _almostUpNotificationSent = true;
 
-                    await Trader.SendMessageAsync(embed: almostUpEmbed).ConfigureAwait(false);
-                }
-                else if (!position.Detail.Trade.IsProcessing && _initialUpdateSent && !_almostUpNotificationSent && _lastReportedPosition % 3 == 0)
-                {
-                    // Regular queue update - only send every 3 position changes to avoid spam
-                    // Don't send regular updates if we've already sent the "almost up" notification
-                    var queueUpdateEmbed = new EmbedBuilder
-                    {
-                        Color = Color.Blue,
-                        Title = "Queue Position Update",
-                        Description = $"You are still in queue. Your current position: **{currentPosition}**.",
-                        Footer = new EmbedFooterBuilder
-                        {
-                            Text = $"Estimated wait time: {(currentETA > 0 ? $"{currentETA} minutes" : "Less than a minute")}"
-                        },
-                        Timestamp = DateTimeOffset.Now
-                    }.Build();
+                        var batchInfo = TotalBatchTrades > 1 ? $"\n\n**Important:** This is a batch trade with {TotalBatchTrades} Pokémon. Please stay in the trade until all are completed!" : "";
 
-                    await Trader.SendMessageAsync(embed: queueUpdateEmbed).ConfigureAwait(false);
+                        var upNextEmbed = new EmbedBuilder
+                        {
+                            Color = Color.Gold,
+                            Title = "🎯 You're Up Next!",
+                            Description = $"Your trade will begin very soon. Please be ready!{batchInfo}",
+                            Footer = new EmbedFooterBuilder
+                            {
+                                Text = "Get ready to connect!"
+                            },
+                            Timestamp = DateTimeOffset.Now
+                        }.Build();
+
+                        await Trader.SendMessageAsync(embed: upNextEmbed).ConfigureAwait(false);
+                    }
+                    // No other periodic updates - this prevents Discord spam
                 }
+            }
+            catch
+            {
+                // Swallow — async void timer callbacks must not let exceptions escape
             }
         },
         null,
@@ -197,8 +212,8 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
         _almostUpNotificationSent = true;
 
         int language = 2;
-        var speciesName = SpeciesName.GetSpeciesName(Data.Species, language);
-        var receive = Data.Species == 0 ? string.Empty : $" ({Data.Nickname})";
+        var speciesName = IsMysteryEgg ? "Mystery Egg" : SpeciesName.GetSpeciesName(Data.Species, language);
+        var receive = Data.Species == 0 ? string.Empty : (IsMysteryEgg ? "" : $" ({Data.Nickname})");
 
         if (Data is PK9)
         {
@@ -221,16 +236,16 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
                 message = $"Initializing trade{receive}. Please be ready.";
             }
 
-            EmbedHelper.SendTradeInitializingEmbedAsync(Trader, speciesName, Code, IsMysteryEgg, message).ConfigureAwait(false);
+            FireAndForget(() => EmbedHelper.SendTradeInitializingEmbedAsync(Trader, speciesName, Code, IsMysteryEgg, message));
         }
-        else if (Data is PB7 && LGCode != null)
+        else if (Data is PB7)
         {
             var (thefile, lgcodeembed) = CreateLGLinkCodeSpriteEmbed(LGCode);
-            Trader.SendFileAsync(thefile, $"Initializing trade{receive}. Please be ready. Your code is", embed: lgcodeembed).ConfigureAwait(false);
+            FireAndForget(() => Trader.SendFileAsync(thefile, $"Initializing trade{receive}. Please be ready. Your code is", embed: lgcodeembed));
         }
         else
         {
-            EmbedHelper.SendTradeInitializingEmbedAsync(Trader, speciesName, Code, IsMysteryEgg).ConfigureAwait(false);
+            FireAndForget(() => EmbedHelper.SendTradeInitializingEmbedAsync(Trader, speciesName, Code, IsMysteryEgg));
         }
     }
 
@@ -246,7 +261,7 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
         {
             var batchInfo = TotalBatchTrades > 1 ? $" (Trade {BatchTradeNumber}/{TotalBatchTrades})" : "";
             var message = $"I'm waiting for you{trainer}{batchInfo}! My IGN is **{routine.InGameName}**.";
-            Trader.SendMessageAsync(message).ConfigureAwait(false);
+            FireAndForget(() => Trader.SendMessageAsync(message));
         }
         else
         {
@@ -259,12 +274,12 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
                 }
                 else
                 {
-                    var speciesName = SpeciesName.GetSpeciesName(Data.Species, 2);
+                    var speciesName = IsMysteryEgg ? "Mystery Egg" : SpeciesName.GetSpeciesName(Data.Species, 2);
                     additionalMessage = $"Trade {BatchTradeNumber}/{TotalBatchTrades}: Now trading {speciesName}. **Select your next Pokémon!**";
                 }
             }
 
-            EmbedHelper.SendTradeSearchingEmbedAsync(Trader, trainer, routine.InGameName, additionalMessage).ConfigureAwait(false);
+            FireAndForget(() => EmbedHelper.SendTradeSearchingEmbedAsync(Trader, trainer, routine.InGameName, additionalMessage));
         }
     }
 
@@ -277,7 +292,7 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
             ? $"Batch trade canceled: {msg}. All remaining trades have been canceled."
             : msg.ToString();
 
-        EmbedHelper.SendTradeCanceledEmbedAsync(Trader, cancelMessage).ConfigureAwait(false);
+        FireAndForget(() => EmbedHelper.SendTradeCanceledEmbedAsync(Trader, cancelMessage));
     }
 
     public void TradeFinished(PokeRoutineExecutor<T> routine, PokeTradeDetail<T> info, T result)
@@ -303,7 +318,7 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
             else
             {
                 // Mid-batch trade
-                var speciesName = SpeciesName.GetSpeciesName(Data.Species, 2);
+                var speciesName = IsMysteryEgg ? "Mystery Egg" : SpeciesName.GetSpeciesName(Data.Species, 2);
                 message = $"✅ Trade {BatchTradeNumber}/{TotalBatchTrades} completed! ({speciesName})\n" +
                          $"Preparing trade {BatchTradeNumber + 1}/{TotalBatchTrades}...";
             }
@@ -314,13 +329,13 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
             message = tradedToUser != 0 ? $"Trade finished. Enjoy!" : "Trade finished!";
         }
 
-        Trader.SendMessageAsync(message).ConfigureAwait(false);
+        FireAndForget(() => Trader.SendMessageAsync(message));
 
         // For single trades only, return the Pokemon immediately
         // Batch trades will have their Pokemon returned separately via SendNotification
         if (result is not null && Hub.Config.Discord.ReturnPKMs && TotalBatchTrades <= 1)
         {
-            Trader.SendPKMAsync(result, "Here's what you traded me!").ConfigureAwait(false);
+            FireAndForget(() => Trader.SendPKMAsync(result, "Here's what you traded me!"));
         }
     }
 
@@ -332,7 +347,7 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
             message = $"Trade {BatchTradeNumber}/{TotalBatchTrades}: {message}";
         }
 
-        EmbedHelper.SendNotificationEmbedAsync(Trader, message).ConfigureAwait(false);
+        FireAndForget(() => EmbedHelper.SendNotificationEmbedAsync(Trader, message));
     }
 
     public void SendNotification(PokeRoutineExecutor<T> routine, PokeTradeDetail<T> info, PokeTradeSummary message)
@@ -346,7 +361,9 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
         var msg = message.Summary;
         if (message.Details.Count > 0)
             msg += ", " + string.Join(", ", message.Details.Select(z => $"{z.Heading}: {z.Detail}"));
-        Trader.SendMessageAsync(msg).ConfigureAwait(false);
+        if (msg.Length > 2000)
+            msg = msg[..1997] + "...";
+        FireAndForget(() => Trader.SendMessageAsync(msg));
     }
 
     public void SendNotification(PokeRoutineExecutor<T> routine, PokeTradeDetail<T> info, T result, string message)
@@ -354,7 +371,7 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
         // Always send the Pokemon if requested, regardless of trade type
         if (result.Species != 0 && (Hub.Config.Discord.ReturnPKMs || info.Type == PokeTradeType.Dump))
         {
-            Trader.SendPKMAsync(result, message).ConfigureAwait(false);
+            FireAndForget(() => Trader.SendPKMAsync(result, message));
         }
     }
 
@@ -370,7 +387,7 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
             x.IsInline = false;
         });
         var msg = $"Here are the details for `{r.Seed:X16}`:";
-        Trader.SendMessageAsync(msg, embed: embed.Build()).ConfigureAwait(false);
+        FireAndForget(() => Trader.SendMessageAsync(msg, embed: embed.Build()));
     }
 
     public static (string, Embed) CreateLGLinkCodeSpriteEmbed(List<Pictocodes> lgcode)
@@ -420,5 +437,21 @@ public class DiscordTradeNotifier<T> : IPokeTradeNotifier<T>
         filename = System.IO.Path.GetFileName($"{System.IO.Directory.GetCurrentDirectory()}//finalcode.png");
         Embed returnembed = new EmbedBuilder().WithTitle($"{lgcode[0]}, {lgcode[1]}, {lgcode[2]}").WithImageUrl($"attachment://{filename}").Build();
         return (filename, returnembed);
+    }
+
+    public void SendSystemNotification(string message)
+    {
+        FireAndForget(() => Trader.SendMessageAsync(message));
+    }
+
+    public void Dispose()
+    {
+        StopPeriodicUpdates();
+        GC.SuppressFinalize(this);
+    }
+
+    ~DiscordTradeNotifier()
+    {
+        Dispose();
     }
 }

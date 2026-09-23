@@ -1,4 +1,5 @@
 using PKHeX.Core;
+using PKHeX.Core.AutoMod;
 using SysBot.Base;
 using SysBot.Pokemon.Helpers;
 using System;
@@ -38,11 +39,37 @@ namespace SysBot.Pokemon.Twitch
             try
             {
                 var sav = AutoLegalityWrapper.GetTrainerInfo<T>();
-                PKM pkm = sav.GetLegal(template, out var result);
+
+                // Check if this is an egg request
+                bool isEgg = set.Nickname.Equals("egg", StringComparison.CurrentCultureIgnoreCase) && Breeding.CanHatchAsEgg(set.Species);
+
+                PKM pkm;
+                string result;
+                if (isEgg)
+                {
+                    pkm = sav.GenerateEgg(template, out var eggResult);
+                    result = eggResult.ToString();
+                    if (eggResult != LegalizationResult.Regenerated)
+                    {
+                        msg = $"Skipping trade, @{username}: Failed to generate egg.";
+                        return false;
+                    }
+
+                    // ShowdownSet.Nature is not populated for egg-format sets ("Egg (Species)"),
+                    // so we parse the requested nature directly from the raw set string.
+                    var requestedNature = ParseNatureFromContent(setstring);
+                    if (requestedNature.HasValue)
+                    {
+                        pkm.Nature = requestedNature.Value;
+                        pkm.StatAlignment = requestedNature.Value;
+                    }
+                }
+                else
+                {
+                    pkm = sav.GetLegal(template, out result);
+                }
 
                 var nickname = pkm.Nickname.ToLower();
-                if (nickname == "egg" && Breeding.CanHatchAsEgg(pkm.Species))
-                    TradeExtensions<T>.EggTrade(pkm, template);
 
                 if (pkm.Species == 132 && (nickname.Contains("atk") || nickname.Contains("spa") || nickname.Contains("spe") || nickname.Contains("6iv")))
                     TradeExtensions<T>.DittoTrade(pkm);
@@ -106,6 +133,20 @@ namespace SysBot.Pokemon.Twitch
                 QueueResultRemove.Removed => "Removed you from the queue.",
                 _ => "Sorry, you are not currently in the queue.",
             };
+        }
+
+        private static Nature? ParseNatureFromContent(string content)
+        {
+            foreach (var raw in content.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (!line.StartsWith("Nature:", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var natureName = line["Nature:".Length..].Trim();
+                if (Enum.TryParse<Nature>(natureName, ignoreCase: true, out var nature) && (byte)nature < 25)
+                    return nature;
+            }
+            return null;
         }
     }
 }

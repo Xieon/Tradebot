@@ -4,6 +4,7 @@ using Discord.Net;
 using Discord.WebSocket;
 using Newtonsoft.Json;
 using PKHeX.Core;
+using PKHeX.Core.AutoMod;
 using SysBot.Base;
 using SysBot.Pokemon.Helpers;
 using System;
@@ -184,11 +185,16 @@ public class TradeModule<T> : ModuleBase<SocketCommandContext> where T : PKM, ne
             try
             {
                 var sav = AutoLegalityWrapper.GetTrainerInfo<T>();
-                var pkm = sav.GetLegal(template, out var result);
 
-                if (pkm == null)
+                // Generate the egg using ALM's GenerateEgg method
+                var pkm = sav.GenerateEgg(template, out var result);
+
+                if (result != LegalizationResult.Regenerated)
                 {
-                    await ReplyAsync("Set took too long to legalize.");
+                    var reason = result == LegalizationResult.Timeout
+                        ? "Egg generation took too long."
+                        : "Failed to generate egg from the provided set.";
+                    await Helpers<T>.ReplyAndDeleteAsync(Context, reason, 2);
                     return;
                 }
 
@@ -198,8 +204,6 @@ public class TradeModule<T> : ModuleBase<SocketCommandContext> where T : PKM, ne
                     await Helpers<T>.ReplyAndDeleteAsync(Context, "Oops! I wasn't able to create an egg for that.", 2);
                     return;
                 }
-
-                Helpers<T>.ApplyEggLogic(pk, content);
 
                 var sig = Context.User.GetFavor();
                 await Helpers<T>.AddTradeToQueueAsync(Context, code, Context.User.Username, pk, sig, Context.User).ConfigureAwait(false);
@@ -530,6 +534,16 @@ public class TradeModule<T> : ModuleBase<SocketCommandContext> where T : PKM, ne
     [RequireQueueRole(nameof(DiscordManager.RolesTrade))]
     public async Task BatchTradeAsync([Summary("List of Showdown Sets separated by '---'")][Remainder] string content)
     {
+        var tradeConfig = SysCord<T>.Runner.Config.Trade.TradeConfiguration;
+
+        // Check if batch trades are allowed
+        if (!tradeConfig.AllowBatchTrades)
+        {
+            await Helpers<T>.ReplyAndDeleteAsync(Context,
+                "Batch trades are currently disabled by the bot administrator.", 2);
+            return;
+        }
+
         var userID = Context.User.Id;
         if (!await Helpers<T>.EnsureUserNotInQueueAsync(userID))
         {
@@ -539,8 +553,11 @@ public class TradeModule<T> : ModuleBase<SocketCommandContext> where T : PKM, ne
         }
         content = ReusableActions.StripCodeBlock(content);
         var trades = BatchHelpers<T>.ParseBatchTradeContent(content);
-        const int maxTradesAllowed = 4;
-        if (maxTradesAllowed < 1 || trades.Count > maxTradesAllowed)
+
+        // Use configured max trades per batch, default to 4 if less than 1
+        int maxTradesAllowed = tradeConfig.MaxPkmsPerTrade > 0 ? tradeConfig.MaxPkmsPerTrade : 4;
+
+        if (trades.Count > maxTradesAllowed)
         {
             await Helpers<T>.ReplyAndDeleteAsync(Context,
                 $"You can only process up to {maxTradesAllowed} trades at a time. Please reduce the number of trades in your batch.", 5);
@@ -593,14 +610,23 @@ public class TradeModule<T> : ModuleBase<SocketCommandContext> where T : PKM, ne
             }
             catch (Exception ex)
             {
+                var location = DiscordLogUtil.GetChannelLocation(Context);
+                Base.LogUtil.LogError($"Batch trade processing error. {location} Error: {ex.Message}", nameof(BatchTradeAsync));
+
                 try
                 {
                     await processingMessage.DeleteAsync();
                 }
                 catch { }
 
-                await Context.Channel.SendMessageAsync($"{Context.User.Mention} An error occurred while processing your batch trade. Please try again.");
-                Base.LogUtil.LogError($"Batch trade processing error: {ex.Message}", nameof(BatchTradeAsync));
+                try
+                {
+                    await Context.Channel.SendMessageAsync($"{Context.User.Mention} An error occurred while processing your batch trade. Please try again.");
+                }
+                catch (HttpException notifyEx)
+                {
+                    Base.LogUtil.LogError($"Failed to notify channel of batch trade error. {location} Discord error: {(int?)notifyEx.DiscordCode ?? (int)notifyEx.HttpCode} {notifyEx.Reason}", nameof(BatchTradeAsync));
+                }
             }
         });
 
@@ -626,7 +652,10 @@ public class TradeModule<T> : ModuleBase<SocketCommandContext> where T : PKM, ne
         {
             try
             {
-                var result = await Helpers<T>.ProcessShowdownSetAsync(content);
+                // Detect custom trainer info BEFORE generating the Pokemon
+                var ignoreAutoOT = content.Contains("OT:") || content.Contains("TID:") || content.Contains("SID:");
+
+                var result = await Helpers<T>.ProcessShowdownSetAsync(content, ignoreAutoOT);
 
                 if (result.Pokemon == null)
                 {
@@ -635,7 +664,6 @@ public class TradeModule<T> : ModuleBase<SocketCommandContext> where T : PKM, ne
                 }
 
                 var sig = Context.User.GetFavor();
-                var ignoreAutoOT = content.Contains("OT:") || content.Contains("TID:") || content.Contains("SID:");
 
                 await Helpers<T>.AddTradeToQueueAsync(
                     Context, code, Context.User.Username, result.Pokemon, sig, Context.User,

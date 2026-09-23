@@ -90,7 +90,7 @@ public static class DetailsExtractor<T> where T : PKM, new()
     {
         if (isCloneRequest || isSpecialRequest)
         {
-            embedBuilder.WithThumbnailUrl("https://raw.githubusercontent.com/hexbyt3/sprites/main/profoak.png");
+            embedBuilder.WithThumbnailUrl("https://raw.githubusercontent.com/Secludedly/ZE-FusionBot-Sprite-Images/main/profoak.png");
         }
         else if (!string.IsNullOrEmpty(heldItemUrl))
         {
@@ -240,10 +240,10 @@ public static class DetailsExtractor<T> where T : PKM, new()
 
     private static string GetLanguageDisplay(T pk)
     {
-        int safeLanguage = (int)Language.GetSafeLanguage(pk.Generation, (LanguageID)pk.Language, (GameVersion)pk.Version);
+        int safeLanguage = pk.Language;
 
         string languageName = "Unknown";
-        var languageList = GameInfo.LanguageDataSource(pk.Format);
+        var languageList = GameInfo.LanguageDataSource(pk.Format, pk.Context);
         var languageEntry = languageList.FirstOrDefault(l => l.Value == pk.Language);
 
         if (languageEntry != null)
